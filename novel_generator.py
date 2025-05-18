@@ -44,7 +44,7 @@ chatLLM = ChatOpenAI(
     # *** 解决错误的关键在于添加 model_kwargs 参数 ***
     model_kwargs={
         # extra_body 字典中的内容会被添加到 API 请求的 body 中
-        "extra_body": {"enable_thinking": True}
+        "extra_body": {"enable_thinking": False}
     },
 )
 
@@ -80,9 +80,12 @@ class Judge(BaseModel):
 judger = chatLLM.with_structured_output(Judge)
 
 
-def create_structured_evaluator_prompt(text):
+def create_structured_evaluator_prompt(novel_premise, previous_chapter_content, current_chapter_outline, text):
     return (
         "你是一个评估小说章节质量并提供结构化反馈的AI助手。\n"
+        f"小说的主题大纲是：\n{novel_premise}\n\n"
+        f"上一章的内容是：\n{previous_chapter_content}\n\n"
+        f"本章的大纲是：\n{current_chapter_outline}\n\n"
         "你必须回复一个符合以下精确模式的有效JSON对象；\n"
         "请你根据大众的喜好程度，以及文章的整体内容和完整度等方面作为评判依据；\n"
         '{"quality": "good" 或 "bad"}\n\n'
@@ -174,6 +177,9 @@ def judge_quality_node(state: NovelWorkflowState) -> NovelWorkflowState:
         ),
     ]
     judge_prompt = create_structured_evaluator_prompt(
+        state["novel_premise"],
+        state["previous_chapter_content"],
+        state["current_chapter_outline"],
         state["current_chapter_full_content"]
     )
     try:
@@ -246,10 +252,21 @@ def save_chapter_and_update_state_node(state: NovelWorkflowState) -> NovelWorkfl
     chapter_number = state["current_chapter_number"]
     filename = f"novel_chapter_{chapter_number}.txt"
 
-    with open(filename, "w", encoding="utf-8") as f:
+    # Determine the project root directory (one level up from the script's directory)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    # Define the target directory for novel chapters within the project root
+    novel_chapters_dir = os.path.join(project_root, "novel_chapters")
+
+    # Create the target directory if it doesn't exist
+    os.makedirs(novel_chapters_dir, exist_ok=True)
+
+    filepath = os.path.join(novel_chapters_dir, filename)
+
+    with open(filepath, "w", encoding="utf-8") as f:
         f.write(f"章节 {chapter_number}\n\n")
         f.write(chapter_content)
-    print(f"章节 {chapter_number} 已保存到 {filename}")
+    print(f"章节 {chapter_number} 已保存到 {filepath}")
 
     # Ensure all_generated_chapters is initialized if not present
     all_chapters_so_far = state.get("all_generated_chapters", [])
@@ -350,7 +367,16 @@ def generate_novel_chapters(topic: str, num_chapters: int = 10):
 
 # Example usage
 if __name__ == "__main__":
-    novel_topic = "题目：《归零代码：当意识成为数据商品》。主题是：近未来数据朋克背景下，一场横跨虚拟与现实的记忆猎杀，揭开人类文明最黑暗的「意识永生」交易链，主人公名字是「归零」。"
+    novel_topic = '''
+    题目
+    《红月之下：异能者重启文明》
+
+    简介
+    2025年，红月高悬夜空，地球陷入克苏鲁神话的恐怖笼罩。女主夏晴沐因死亡重生回灾难前一个月，觉醒"情绪共鸣"异能，却发现自己的前世竟是这场末日的导火索。
+    为阻止旧日支配者的降临，她组建"异能者联盟"，在克系怪物横行、赛博修真崛起的末日世界中，揭开跨越千年的文明重启计划——有人想毁灭人类，有人想掌控人类，
+    而她必须选择：是拯救世界，还是重塑自己？
+    '''
+
     number_of_chapters_to_generate = 10  # For testing, generate fewer chapters initially. Change to 10 for full request.
 
     print(

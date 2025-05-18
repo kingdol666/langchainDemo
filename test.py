@@ -18,6 +18,7 @@ os.environ["OPENROUTER_API_KEY"] = getenv(
     "OPENROUTER_API_KEY",
     "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",
 )
+
 os.environ["OPENROUTER_BASE_URL"] = getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 )

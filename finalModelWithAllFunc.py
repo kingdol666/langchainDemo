@@ -15,17 +15,21 @@ from langchain import hub
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage # 用于构建多模态消息
-
+from langchain_community.tools.tavily_search import TavilySearchResults # <-- 新增导入
+from rag_embedding import qa_chain
 # --- 获取 API 密钥和 Base URL 从环境变量 ---
 # 确保您的 .env 文件中设置了 MODELSCOPE_API_KEY 和 MODELSCOPE_BASE_URL
 modelscope_api_key = os.getenv("MODELSCOPE_API_KEY")
 modelscope_base_url = os.getenv("MODELSCOPE_BASE_URL")
+tavily_api_key = os.getenv("TAVILY_API_KEY") # <-- 新增Tavily API Key获取
 
 if not modelscope_api_key:
     raise ValueError("MODELSCOPE_API_KEY environment variable not set.")
 if not modelscope_base_url:
     # ModelScope BASE_URL is often required for both text and multimodal models
     raise ValueError("MODELSCOPE_BASE_URL environment variable not set.")
+if not tavily_api_key: # <-- 新增Tavily API Key检查
+    raise ValueError("TAVILY_API_KEY environment variable not set. Please set it in your .env file.")
 
 
 # --- 1. 定义并实例化多模态模型 (Qwen2.5-VL) ---
@@ -153,6 +157,9 @@ def image_to_base64_data_url(image_path: str, max_size: tuple = (768, 768)) -> s
     # 3. 编码为Base64
     return encode_image_to_base64(img)
 
+
+# --- 新增：定义联网搜索 Tool --- 
+search_tool = TavilySearchResults(max_results=3) # <-- 实例化搜索工具
 
 # --- 9. 定义图片下载辅助函数 (从 Agent 输出中提取 URL并下载，与之前相同) ---
 def extract_image_url(agent_output_string: str) -> str:
@@ -330,9 +337,9 @@ def generate_image_from_text(prompt: str) -> str:
         response_data = make_image_api_request(prompt)
         image_url = parse_image_api_response(response_data)
         if image_url.startswith('http'):
-            print(f"Generated image URL: {image_url}")
+            # print(f"Generated image URL: {image_url}, 已经成功生成出指定图片")
             download_image_from_agent_output(image_url)
-        return image_url
+        return f"Generated image URL: {image_url}, 已经成功生成出指定图片"
     except requests.exceptions.RequestException as e:
         return f"Error calling ModelScope API: {e}"
     except json.JSONDecodeError:
@@ -391,6 +398,23 @@ def describe_image_with_vl(input_string: str) -> str:
     except Exception as e:
         return f"An error occurred in the describe_image_with_vl tool: {e}"
 
+@tool
+def rag_agent(input_string: str) -> str:
+    """
+    基于RAG的问答系统
+
+    参数:
+        input_string: 输入需要在查询知识库中查询的问题，请你将输入的问题优化一下，方便文库智能体的查询
+
+    返回:
+        智能体的回答
+    """
+    try:
+        response = qa_chain.invoke({"query": input_string})
+        return response.get("result")
+    except Exception as e:
+        return f"An error occurred in the rag_agent tool: {e}"
+
 
 def process_image_identifier(image_identifier: str) -> dict:
     """
@@ -420,8 +444,10 @@ def process_image_identifier(image_identifier: str) -> dict:
 
 # --- 4. 定义 Agent 需要使用的工具列表 (包含两个 Tool) ---
 tools = [
+    rag_agent,                 # <-- 新增 RAG 工具 (优先)
     generate_image_from_text, # 文生图 Tool
-    describe_image_with_vl    # 识图 Tool
+    describe_image_with_vl,   # 识图 Tool
+    search_tool               # <-- 新增搜索工具
 ]
 
 # --- 5. 定义 Agent 使用的 LLM (智能体的思考核心) ---
@@ -438,7 +464,27 @@ agent_llm = ChatOpenAI(
 
 # --- 6. 获取 Agent Prompt ---
 # 使用 ReAct 或 Tool Calling Prompt
-prompt = hub.pull("hwchase17/react") # Or hub.pull("hwchase17/tool-calling-agent")
+# 优先使用 rag_agent 进行知识库查询
+prompt = hub.pull("hwchase17/react")
+prompt.template = """Answer the following questions as best you can. You have access to the following tools:
+
+{tools}
+
+Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do. If the question can be answered by querying the knowledge base (using 'rag_agent') or by searching the web (using 'search_tool'), you MUST prioritize using 'rag_agent'. Only use 'search_tool' if 'rag_agent' is not applicable or fails to provide a sufficient answer.
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+Begin!
+
+Question: {input}
+Thought:{agent_scratchpad}""" # Or hub.pull("hwchase17/tool-calling-agent")
 
 # --- 7. 创建 Agent ---
 # Create React Agent (more general) or Tool Calling Agent (if LLM supports function calling)
@@ -449,7 +495,7 @@ agent = create_react_agent(agent_llm, tools, prompt)
 
 
 # --- 8. 创建 Agent Executor ---
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) # verbose=True helps debugging
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True) # verbose=True helps debugging
 
 
 
@@ -457,40 +503,52 @@ agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) # verbose
 print("Running agent...")
 
 # 示例 1: 文生图请求
-user_query_generate = "请帮我生成一个可爱性感的妹子的全身照。"
-response_generate = agent_executor.invoke({"input": user_query_generate})
-print("\nAgent Response (Generate):")
-print(response_generate['output'])
+# user_query_generate = "请帮我生成一个可爱性感的妹子的全身照。"
+# response_generate = agent_executor.invoke({"input": user_query_generate})
+# print("\nAgent Response (Generate):")
+# print(response_generate['output'])
 # 尝试下载生成的图片
 
 
-print("\n" + "="*50 + "\n")
+# print("\n" + "="*50 + "\n")
 
 # 示例 2: 识图请求 (提供图片 URL)
 # IMPORTANT: Your user input needs to include the image reference for the Agent to see it!
 # The Agent LLM will read this string and decide if it matches the "describe_image_with_vl" tool's need.
 # You might need to experiment with how your specific Agent LLM understands image references in text.
 # Including the URL directly or using a marker is common.
-image_url_for_description = "https://modelscope.oss-cn-beijing.aliyuncs.com/demo/images/audrey_hepburn.jpg"
-user_query_describe_url = f"请描述这张图片里是谁？图片链接是：{image_url_for_description}"
+# image_url_for_description = "https://modelscope.oss-cn-beijing.aliyuncs.com/demo/images/audrey_hepburn.jpg"
+# user_query_describe_url = f"请描述这张图片里是谁？图片链接是：{image_url_for_description}"
 # The Agent needs to parse this: "请描述这张图片里是谁？" is the question, "{image_url_for_description}" is the image identifier.
 # The Agent LLM's reasoning steps (shown if verbose=True) will show how it tries to format the input for the tool.
 
-response_describe_url = agent_executor.invoke({"input": user_query_describe_url})
-print("\nAgent Response (Describe URL):")
-print(response_describe_url['output'])
+# response_describe_url = agent_executor.invoke({"input": user_query_describe_url})
 
 
-print("\n" + "="*50 + "\n")
+def useAgent(agent_executor: AgentExecutor, input: str) -> str:
+    response = agent_executor.invoke({"input": input})
+    res = "\nagent:" + response['output']
+    return res
 
-# 示例 3: 识图请求 (提供本地图片 Base64 数据 URL)
-# This requires you to first convert the local image to Base64 and include it in the user query string.
-local_image_path_for_description = "langchainDemo/images/2.png" # Replace with your local image path
+# print("\nAgent Response (Describe URL):")
+# print(response_describe_url['output'])
 
 
-user_query_describe_base64 = f"这张图片里有什么？图片路径：{local_image_path_for_description}"
-    # Again, Agent needs to parse this.
+# print("\n" + "="*50 + "\n")
 
-response_describe_base64 = agent_executor.invoke({"input": user_query_describe_base64})
-print("\nAgent Response (Describe Base64):")
-print(response_describe_base64['output'])
+# # 示例 3: 识图请求 (提供本地图片 Base64 数据 URL)
+# # This requires you to first convert the local image to Base64 and include it in the user query string.
+# local_image_path_for_description = "langchainDemo/images/2.png" # Replace with your local image path
+
+
+# user_query_describe_base64 = f"这张图片里有什么？图片路径：{local_image_path_for_description}"
+#     # Again, Agent needs to parse this.
+
+# response_describe_base64 = agent_executor.invoke({"input": user_query_describe_base64})
+# print("\nAgent Response (Describe Base64):")
+# print(response_describe_base64['output'])
+# 示例 4: 联网搜索请求
+# user_query_search = "今天北京的天气怎么样？"
+# response_search = agent_executor.invoke({"input": user_query_search})
+# print("\nAgent Response (Search):")
+# print(response_search['output'])
